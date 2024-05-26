@@ -6,6 +6,7 @@ from IPython.display import display, Pretty
 import torch
 from torch import Tensor
 from torch.optim import Adam
+from torch.optim.lr_scheduler import ReduceLROnPlateau
 
 from torchvision.transforms import functional as TF
 
@@ -236,7 +237,7 @@ class StyleTransfer:
                 iterations: int = 500,
                 initial_iterations: int = 1000,
 
-                step_size: float = 0.02,
+                step_size: float = 0.05,
                 avg_decay: float = 0.99,
                 init: str = 'content',
 
@@ -251,7 +252,7 @@ class StyleTransfer:
                 plot_every: int = 100,
 
                 save_path: str = "./out.png",
-                save_every: int = 10):
+                save_every: int = 50):
 
         if square_faces and not crop_faces:
             raise ValueError("To use 'square_faces', 'crop_faces' need to be True.")
@@ -346,11 +347,16 @@ class StyleTransfer:
                 optimizer_state = scale_adam(optimizer.state_dict(), (ch, cw))
                 scale_optimizer.load_state_dict(optimizer_state)
             optimizer = scale_optimizer
+            scheduler = ReduceLROnPlateau(optimizer, mode='min', factor=0.2, patience=40, min_lr=1e-6, verbose=True)
 
             if self.device.type == 'cuda':
                 torch.cuda.empty_cache()
 
-            max_iterations = initial_iterations if scale == scales[0] else iterations
+            max_iterations = iterations
+            if scale == scales[0]:
+                max_iterations = initial_iterations
+            if scale == scales[-1]:
+                max_iterations = iterations*5
             for i in range(1, max_iterations + 1):
                 start_ts = time.time()
 
@@ -360,6 +366,10 @@ class StyleTransfer:
                 optimizer.zero_grad()
                 loss.backward()
                 optimizer.step()
+                scheduler.step(loss)
+                if optimizer.param_groups[0]['lr']<1e-5:
+                    print(f"Break cycle, lr={optimizer.param_groups[0]['lr']}")
+                    break
 
                 # Enforce box constraints.
                 with torch.no_grad():
@@ -368,11 +378,12 @@ class StyleTransfer:
 
                 end_ts = time.time()
 
-                status = f'Size: {cw}x{ch}, iteration: {i}/{max_iterations}, '\
+                status = f'Size: {cw}x{ch}, iteration: {i:3}/{max_iterations}, '\
                          f'loss:{loss:g}, elapsed (ms): {(end_ts - start_ts) * 1000:.2f}'
-                status_display.update(Pretty(status)) if status_display else print(status)
+                status_display.update(Pretty(status)) if status_display else print(status, end='\r')
 
                 if i % save_every == 0 and save_path:
+                    print('')
                     result = self.get_image()
                     result.save(save_path)
 
